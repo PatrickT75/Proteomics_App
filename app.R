@@ -115,10 +115,11 @@ ui <- fluidPage(
                  downloadButton("venndiagram_download", "Download Figure"),
                  tags$hr(),
                  h3("Unique Protein Viewer"),
-                 checkboxGroupInput("venn_unique", "Unique proteins from group(s):",
+                 checkboxGroupInput("venn_unique", "Unique proteins from group(s) in the Venn Diagram:",
                                     choices = c(Group1 = "group1",
                                                 Group2 = "group2"),
                                     selected = "group1"),
+                 uiOutput("venn_descriptions"),
                  tableOutput("venndiagram_table")
                  ),
         
@@ -135,6 +136,7 @@ ui <- fluidPage(
         tabPanel("Correlation",
           h3("Correlation Heatmap"),
           radioButtons("corr_disable", "Show Values", choices=c("Enable", "Disable"), selected="Enable"),
+          radioButtons("corr_type", "Compute correlation: ", choices=c(Pearson="pearson", Spearman="spearman"), selected="pearson"),
           plotOutput("correlation"),
           downloadButton("correlation_download", "Download Figure"),
           tags$hr(),
@@ -189,6 +191,8 @@ ui <- fluidPage(
                    ),
           actionButton("heatmap_run", "Run"),
           fixedRow(plotOutput("heatmap")),
+          uiOutput("heatmap_cluster_numbers"),
+          tags$hr(),
           uiOutput("heatmap_info"),
           downloadButton("heatmap_download", "Download Figure"),
           tags$hr(),
@@ -224,14 +228,16 @@ ui <- fluidPage(
                                              PC5 = "5"),
                                  selected = "3"))
           ),
-          column(12, plotOutput("pca")),
+          actionButton("pca_run", "Run"),
+          plotOutput("pca"),
           downloadButton("pca_download", "Download Figure"),
           tags$hr(),
           h3("3-D Principal Component Analysis"),
-          actionButton("pca3d_snapshot", "Take snapshot"),
           column(12, rglwidgetOutput("pca3d", width="700px", height="512px")),
+          actionButton("pca3d_snapshot", "Take snapshot"),
+          tags$hr(),
           h3("Scree Plot"),
-          column(12, plotOutput("pca_importance")),
+          plotOutput("pca_importance"),
           downloadButton("pca_importance_download", "Download Figure"),
           tags$hr(),
           h3("Top and Bottom Loadings"),
@@ -246,16 +252,16 @@ ui <- fluidPage(
           fixedRow(column(6, div(style='padding:5px'), tableOutput("pca_loadings_top")),
                    column(6, div(style='padding:5px'), tableOutput("pca_loadings_bot"))),
           downloadButton("loadings_button", "Download Loadings"),
-          column(12, plotOutput("pca_loadings_plot")),
+          plotOutput("pca_loadings_plot"),
           downloadButton("pca_loadings_plot_download", "Download Figure"),
+          tags$hr(),
           fixedRow(
           column(6, radioButtons("select_loading", "Plot Distribution of: ", choices=c("Protein 1", "Protein 2")),
                     textInput("select_loading_text", "Search: "),
                     textInput("normalize", "Normalize to (if present): "),
                     actionButton("plot_loadings_scatter", "Plot")),
           ),
-          plotOutput("loadings_scatter"),
-          tags$hr()
+          plotOutput("loadings_scatter")
         ),
         
         tabPanel("Pathway",
@@ -288,10 +294,12 @@ ui <- fluidPage(
                               selected = "CC"),
                  actionButton("go_calculate", "Run"),
                  plotOutput("go_dotplot"),
+                 downloadButton("go_dotplot_download", "Donwload Figure"),
                  uiOutput("go_info"),
                  tags$hr(),
                  selectInput("go_genelist", "See genes involved in: ",
                              choices=c(1,2,3)),
+                 checkboxGroupInput("go_heatmap_groups", "Show groups: "),
                  actionButton("go_heatmap_run", "View"),
                  plotOutput("go_new_heatmap"),
                  downloadButton("go_heatmap_download", "Download Heatmap")
@@ -332,8 +340,12 @@ ui <- fluidPage(
                  tags$hr(),
                  h3("Running Enrichment Score"),
                  plotOutput("gsea_running"),
+                 downloadButton("gsea_running_download", "Download Figure"),
+                 tags$hr(),
                  h3("Heatmap of Selected Proteins"),
-                 plotOutput("gsea_new_heatmap")
+                 checkboxGroupInput("gsea_heatmap_groups", "Show groups: "),
+                 plotOutput("gsea_new_heatmap"),
+                 downloadButton("gsea_heatmap_download", "Download Figure")
           ),
         selected = "Data"
       )
@@ -349,6 +361,7 @@ server <- function(input, output, session) {
    while (!is.null(dev.list()))  dev.off()
    
    ##################### INPUT########################
+   # update checkbox groups for subsequent analyses
    observe({
     choice <- names()
     select1 <- choice[1]
@@ -370,13 +383,23 @@ server <- function(input, output, session) {
                              inputId = "groups_heatmap",
                              choices = choice,
                              selected = choice)
+    updateCheckboxGroupInput(session = session,
+                             inputId = "go_heatmap_groups",
+                             choices = choice,
+                             selected = choice)
+    updateCheckboxGroupInput(session = session,
+                             inputId = "gsea_heatmap_groups",
+                             choices = choice,
+                             selected = choice)
     
   })
-  
+   
+   # total number of samples
    observations <- eventReactive(input$submit, {
      return(base::nrow(metadf()))
    })
-   
+    
+   # show grouping of samples/replicates
    metadf <- reactive({
      req(input$file2)
      df <- read.csv(input$file2$datapath,
@@ -396,6 +419,7 @@ server <- function(input, output, session) {
      return(df)
    })
    
+   # shows how many replicates are in each group
    metadf_summary <- reactive({
      sum <- base::as.data.frame(summary(metadf()$V2))
      base::colnames(sum) <- "Replicates"
@@ -407,15 +431,18 @@ server <- function(input, output, session) {
      return(l)
    })
    
+   # group names
    names <- eventReactive(input$submit, {
      return(rownames(metadf_summary()))
    })
    
+   # for each group, how many replicates are there?
    times <- reactive({
      times <- as.vector(metadf_summary())
      return(times$Replicates)
    })
    
+   # expression of each replicate, ordered the same as the grouping. NA can be omitted.
    df <- reactive({
      req(input$file1)
      df <- read.csv(input$file1$datapath,
@@ -443,23 +470,14 @@ server <- function(input, output, session) {
      return(df)
    })
    
+   # matrix only - no names of proteins
    dfres <- reactive({
      obs <- observations()
      dfr <- df()[2:(obs+1)]
      return(dfr)
    })
-   
-   alpha <- reactive({
-     if(base::nrow(dfres()) < 1000)
-     {return(0.2)}
-     if(base::nrow(dfres()) < 2500)
-     {return(0.1)}
-     if(base::nrow(dfres()) < 4000)
-     {return(0.03)}
-     if(base::nrow(dfres()) >= 4000)
-     {return(0.01)}
-   })
   
+   # inverted dataframe - samples are in rows. df_trans()$group gives the grouping of each sample.
    df_trans <- reactive({
      df_t <- base::as.data.frame(base::t(dfres()))
      df_t$group <- rep(names(), times())
@@ -468,6 +486,7 @@ server <- function(input, output, session) {
    
    
    ################# DATA AND QUALITY CHECK #################
+   # show contents for check
    contents_table <- eventReactive(input$submit, {
      means <- apply(dfres(), 1, mean)
      max <- apply(dfres(), 1, max)
@@ -494,6 +513,7 @@ server <- function(input, output, session) {
      contents_table()
    })
    
+   # description for contents table
    output$length <- renderUI({
      len <- base::nrow(dfres())
      
@@ -511,13 +531,14 @@ server <- function(input, output, session) {
      return(m)
    })
    
+   # view distribution of individual protein
    protdist_viewer <- eventReactive(input$protein_viewer_run, {
      table <- base::subset(df(), df()[,1] == input$protein_viewer_select)
      table <- table[,2:ncol(table)]
      table <- melt(table)
      table$group <- rep(names(), times())
      p <- ggplot(table, aes(x=group, y=log(value), fill=group)) +
-      geom_boxplot() + geom_point()
+      geom_boxplot() + geom_point(position = position_jitter(seed = 1, width = 0.2))
      return(p)
    })
    
@@ -526,8 +547,9 @@ server <- function(input, output, session) {
    })
    
    ################# VENN DIAGRAM #########################
-   observeEvent(input$submit, {
-     choice <- names()
+   # update venn diagram unique protein viewer to only include groups in the venn diagram
+   observeEvent(input$venn_run, {
+     choice <- input$venn_choices
      updateCheckboxGroupInput(session = session,
                               inputId = "venn_unique",
                               choices = choice,
@@ -558,6 +580,7 @@ server <- function(input, output, session) {
      upsetjs() %>% fromList(protein_list) %>% interactiveChart()
    })
    
+   # table output: first column = protein names, rest of the columns = Present(T)/Absent(F) for each group
    venn_diagram_table <- eventReactive(input$venn_run, {
      req(input$file1)
      df <- read.csv(input$file1$datapath,
@@ -567,13 +590,14 @@ server <- function(input, output, session) {
                     encoding = "UTF-8")
      # df <- df[rowSums(df[,2:ncol(df)])>0,]
      
-     # SUBSET INTO GROUPS
+     # subset dataframe into smaller dataframes
      mini_dfs <- list()
      for (i in 1:length(names())){
        s <- base::subset(metadf(), metadf()$V2 == names()[i])
        mini_dfs <- list.append(mini_dfs, df[,s$V1])
      }
      
+     # each smaller dataframe is examined for NAs (T/F) in any of the replicates
      na_s <- list()
      for (i in 1:length(mini_dfs)){
        n <- !(apply(mini_dfs[[i]], 1, anyNA))
@@ -584,14 +608,19 @@ server <- function(input, output, session) {
      na_s <- as.data.frame(do.call(cbind, na_s))
      d <- cbind.data.frame(df[,1], na_s)
      base::colnames(d) <- c("Protein", names())
-     print(head(d))
      return(d)
    })
    
    venn_diagram <- eventReactive(input$venn_run, {
-     if(length(input$venn_choices) == 2) {p <- ggvenn(venn_diagram_table(), c(input$venn_choices[1], input$venn_choices[2]), show_percentage=FALSE, stroke_size=0.5)}
-     else if(length(input$venn_choices) == 3) {p <- ggvenn(venn_diagram_table(), c(input$venn_choices[1], input$venn_choices[2], input$venn_choices[3]), show_percentage=FALSE, stroke_size=0.5)}
-     else if(length(input$venn_choices) == 4) {p <- ggvenn(venn_diagram_table(), c(input$venn_choices[1], input$venn_choices[2], input$venn_choices[3], input$venn_choices[4]), show_percentage=FALSE, stroke_size=0.5)}
+     if(length(input$venn_choices) == 2) {
+       p <- ggvenn(venn_diagram_table(), c(input$venn_choices[1], input$venn_choices[2]), show_percentage=FALSE, stroke_size=0.5)
+       }
+     else if(length(input$venn_choices) == 3) {
+       p <- ggvenn(venn_diagram_table(), c(input$venn_choices[1], input$venn_choices[2], input$venn_choices[3]), show_percentage=FALSE, stroke_size=0.5)
+       }
+     else if(length(input$venn_choices) == 4) {
+       p <- ggvenn(venn_diagram_table(), c(input$venn_choices[1], input$venn_choices[2], input$venn_choices[3], input$venn_choices[4]), show_percentage=FALSE, stroke_size=0.5)
+       }
      return(p)
    })
    
@@ -599,8 +628,9 @@ server <- function(input, output, session) {
      return(venn_diagram())
    })
    
-   output$venndiagram_table <- renderTable({
+   output$venndiagram_table_test <- renderTable({
      v <- venn_diagram_table()
+     
      show <- rep(TRUE, length(names()))
      for(i in 1:length(names()))
      {if (names()[i] %in% input$venn_unique) {show[i] <- TRUE}
@@ -614,8 +644,47 @@ server <- function(input, output, session) {
      return(v[,1])
    })
    
+   # this table shows unique proteins from comparisons ONLY if they are in the venn diagram (disregards unselected groups)
+   filtered_venndiagram_table <- reactive({
+     v <- venn_diagram_table()
+     v <- v[,c("Protein", input$venn_choices)]
+     
+     #replaced names with venn_choices
+     show <- rep(TRUE, length(input$venn_choices))
+     for(i in 1:length(input$venn_choices))
+     {if (input$venn_choices[i] %in% input$venn_unique) {show[i] <- TRUE}
+       else {show[i] <- FALSE}
+     }
+     
+     for(i in 1:(length(show)))
+     {
+       v <- v[v[,i+1] == show[i], ]
+     }
+     return(v[,1])
+   })
+   
+   output$venndiagram_table <- renderTable({
+     return(filtered_venndiagram_table())
+   })
+   
+   output$venn_descriptions <- renderUI({
+     return(base::paste("There are ", length(filtered_venndiagram_table()), "unique proteins in the group(s): ", base::paste(input$venn_unique, collapse=", ", ".", sep = "")))
+   })
+   
    
    ######################## VIOLIN PLOT ############################
+   # simple formula for transparency of points in violin plot
+   alpha <- reactive({
+     if(base::nrow(dfres()) < 1000)
+     {return(0.2)}
+     if(base::nrow(dfres()) < 2500)
+     {return(0.1)}
+     if(base::nrow(dfres()) < 4000)
+     {return(0.03)}
+     if(base::nrow(dfres()) >= 4000)
+     {return(0.01)}
+   })
+   
    violin <- eventReactive(input$submit, {
      len <- base::nrow(dfres())
      dfres_melt <- melt(dfres())
@@ -623,6 +692,10 @@ server <- function(input, output, session) {
        geom_violin() + geom_boxplot() + geom_point(position = position_jitter(seed = 1, width = 0.2), alpha=alpha()) +
        theme(axis.ticks.x=element_blank(), axis.text.x=element_blank(),)
      return(p)
+   })
+   
+   output$violin <- renderPlot({
+     return(violin())
    })
    
    violin_agg <- eventReactive(input$submit, {
@@ -638,18 +711,15 @@ server <- function(input, output, session) {
      return(p)
    })
    
-   output$violin <- renderPlot({
-     return(violin())
-   })
-   
    output$violin_agg <- renderPlot({
      return(violin_agg())
    })
    
    
    ################## CORRELATION AND SCATTER PLOT #####################
+   # Pearson or Spearman.
    corrmap <- reactive({
-     cormat <- cor(dfres())
+     cormat <- cor(dfres(), method=input$corr_type)
      
      get_lower_tri<-function(cormat){
        cormat[upper.tri(cormat)] <- NA
@@ -661,15 +731,13 @@ server <- function(input, output, session) {
        return(cormat)
      }
      
+     # Get lower triangular matrix
      lower_tri<- get_lower_tri(cormat)
      
      melted_cormat <- reshape2::melt(lower_tri, na.rm=TRUE)
      
      crc_p<-ggplot(data= melted_cormat, aes(x = Var2, y=reorder(Var1, dplyr::desc(Var1)), fill=value)) +
        geom_tile(color="white") +
-       scale_fill_gradient2(low="blue", high="red", mid="white",
-                            midpoint=((min(unlist(melted_cormat$value)))+1)/2, limit=c(min(unlist(melted_cormat$value)),1.0), space="Lab",
-                            name="Pearson\nCorrelation")+
        theme_minimal() +
        theme(axis.text.x=element_text(angle=45, vjust=1,
                                       
@@ -691,10 +759,22 @@ server <- function(input, output, session) {
                                     title.position = "top", title.hjust = 0.5))
      
      if(input$corr_disable == "Enable") {crc_p <- crc_p + geom_text(aes(label=round(value,2)), color = "black", size = 4)}
-     
+     if(input$corr_type == "pearson") {crc_p <-  crc_p + scale_fill_gradient2(low="blue", high="red", mid="white",
+                                                              midpoint=((min(unlist(melted_cormat$value)))+1)/2, limit=c(min(unlist(melted_cormat$value)),1.0), space="Lab",
+                                                              name="Pearson\nCorrelation")
+     }
+     else if(input$corr_type == "spearman") {crc_p <- crc_p + scale_fill_gradient2(low="blue", high="red", mid="white",
+                                                              midpoint=((min(unlist(melted_cormat$value)))+1)/2, limit=c(min(unlist(melted_cormat$value)),1.0), space="Lab",
+                                                              name="Spearman\nCorrelation")
+     }
      return(crc_p)
    })
    
+   output$correlation <- renderPlot({
+     print(corrmap())
+   })
+   
+   # Scatterplot for every replicate
    scattermat <- eventReactive(input$scatterplot_run, {
      lower.panel<-function(x, y){
        points(x,y, pch = 20)
@@ -706,52 +786,38 @@ server <- function(input, output, session) {
      return(p)
    })
    
-   output$correlation <- renderPlot({
-     print(corrmap())
-   })
-   
    output$scatter <- renderPlot({
      return(scattermat())
    })
    
    
    ####################### VOLCANO PLOT ##########################
+   # dataframe of all replicates in group 1
    v1 <- eventReactive(input$volcano_run, {
      df_1 <- base::subset(df_trans(), df_trans()$group %in% input$groups1)
      v1 <- t(df_1[1:(base::nrow(dfres()))])
      return(v1)
    })
    
+   # dataframe of all replicates in group 2
    v2 <- eventReactive(input$volcano_run, {
      df_2 <- base::subset(df_trans(), df_trans()$group %in% input$groups2)
      v2 <- t(df_2[1:(base::nrow(dfres()))])
      return(v2)
    })
    
-   means_test_volcano <- eventReactive(input$volcano_run, {
-     means_list <- list()
-     
-     for (i in 1:length(names())) {
-       s <- base::subset(df_trans(), df_trans()$group == names()[i])
-       s <- t(s[1:base::nrow(dfres())])
-       means <- apply(s, 1, mean)
-       means_list <- list.append(means_list, means)
-     }
-     
-     means_list <- t(base::do.call(base::rbind, means_list))
-     return(means_list)
-   })
-   
+   # calculates log2fc between v1 and v2
    Log2FC <- eventReactive(input$volcano_run, {
      n1 <- apply(v1(), 1, mean)
      n2 <- apply(v2(), 1, mean)
      
-     fc <- n1/n2
+     fc <- n2/n1
      Log2FC <- log2(fc)
      
      return(Log2FC)
    })
    
+   # for each protein, calculates the t-test p-value between v1 and v2
    df_pval <- eventReactive(input$volcano_run, {
      l_1 <- ncol(v1())
      l_2 <- ncol(v2())
@@ -781,11 +847,15 @@ server <- function(input, output, session) {
      return(tt_log)
    })
    
+   # combines p-value and log2fc into one dataframe
    df_tt <- eventReactive(input$volcano_run, {
      df_tt <- base::cbind(dfres(), Log2FC(), df_pval())
+     df_tt_test <- df_tt[order(df_tt$Pval),]
+     print(head(df_tt_test))
      return(df_tt)
    })
    
+   # combines p-value, log2fc, and significance into one dataframe
    df_sig <- eventReactive(input$volcano_run, {
      fc <- df_tt()[,(base::ncol(df_tt())-2)]
      logpval <- df_pval()[,2]
@@ -816,6 +886,7 @@ server <- function(input, output, session) {
      return(volcano())
    })
    
+   # summary of results from volcano plot
    volcano_info <- eventReactive(input$volcano_run, {
      greater <- base::nrow(base::subset(df_sig(), df_sig()$sig == TRUE & df_sig()[,(ncol(df_sig())-3)] > 0))
      smaller <- base::nrow(base::subset(df_sig(), df_sig()$sig == TRUE & df_sig()[,(ncol(df_sig())-3)] < 0))
@@ -829,6 +900,23 @@ server <- function(input, output, session) {
      return(volcano_info())
    })
    
+   # means of all groups in the entire dataset, to show in volcano list
+   means_test_volcano <- eventReactive(input$volcano_run, {
+     means_list <- list()
+     
+     # apply means for each group
+     for (i in 1:length(names())) {
+       s <- base::subset(df_trans(), df_trans()$group == names()[i])
+       s <- t(s[1:base::nrow(dfres())])
+       means <- apply(s, 1, mean)
+       means_list <- list.append(means_list, means)
+     }
+     
+     means_list <- t(base::do.call(base::rbind, means_list))
+     return(means_list)
+   })
+   
+   # list of significant proteins
    volcano_list <- reactive({
      protein <- df()[,1]
      t <- base::cbind(protein, df_sig())
@@ -852,6 +940,7 @@ server <- function(input, output, session) {
      return(utils::head(volcano_list(), n=20))
    }, digits=4)
    
+   # x-axis: log expression, y-axis: log2FC
    MA_plot <- eventReactive(input$volcano_run, {
      dfs <- df_sig()
      means <- apply(dfs[,1:observations()], 1, mean)
@@ -867,17 +956,33 @@ server <- function(input, output, session) {
      return(p)
    })
    
+   # list of significant proteins ordered by highest average expression
    MA_plot_info <- eventReactive(input$volcano_run, {
-     dfs <- MA_plot()
-     sigs <- dfs[dfs$sig == TRUE,]
-     df_selected <- df()[rownames(sigs),1]
-     means_selected <- means_test_volcano()[rownames(sigs),]
-     t <- cbind.data.frame(df_selected, sigs$means, means_selected)
      names <- as.vector(names())
      for(i in 1:length(names)){
        names[i] <- paste("Average ", names[i], sep="")
      }
+
+     dfs <- MA_plot()
+     sigs <- dfs[dfs$sig == TRUE,]
+     df_selected <- df()[rownames(sigs),1]
+     df_selected <- as.data.frame(df_selected)
+     
+     means_selected <- means_test_volcano()[rownames(sigs),]
+     print(is.vector(means_selected))
+     
+     if(is.vector(means_selected)){
+       means_selected <- t(means_selected)
+     }
+     
+     t <- cbind.data.frame(df_selected, sigs$means)
+     
+     t <- cbind.data.frame(t, means_selected)
+     
+
+     
      colnames(t) <- c("Protein", "Expression", names)
+     print(head(t))
      return(t)
    })
    
@@ -889,8 +994,8 @@ server <- function(input, output, session) {
    
 
    
-   
    ############################ HEATMAP ###############################
+   # collects means for groups that are selected
    means_test <- reactive({
      means_list <- list()
      
@@ -905,16 +1010,19 @@ server <- function(input, output, session) {
      return(means_list)
    })
    
+   # chooses the maximum mean
    v_max_test <- reactive({
      max_index <- apply(means_test(), 1, base::which.max)
      return(as.vector(max_index))
    })
    
+   # chooses the minimum mean
    v_min_test <- reactive({
      min_index <- apply(means_test(), 1, base::which.min)
      return(as.vector(min_index))
    })
    
+   # calculates log2fc between maximum average and minimum average groups
    Log2FC_test <- reactive({
      max <- apply(means_test(), 1, max)
      min <- apply(means_test(), 1, min)
@@ -923,6 +1031,7 @@ server <- function(input, output, session) {
      return(Log2FC)
    })
    
+   # calculates t-test p-value between maximum average and minimum average groups, returns in dataframe
    df_pval_test <- reactive({
      ## ALGORITHM:
      # Keep rolling count (int i)
@@ -937,12 +1046,21 @@ server <- function(input, output, session) {
        maxs <- df_trans()[df_trans()$group == input$groups_heatmap[l1[i]], i]
        mins <- df_trans()[df_trans()$group == input$groups_heatmap[l2[i]], i]
        
+       # t-test in R doesn't accept all the same values for each group
        if (length(unique(maxs) == 1) | length(unique(mins)) == 1)
        {maxs[1] <- maxs[1] + 0.001
        mins[1] <- mins[1] + 0.001}
        result <- t.test(maxs, mins)$p.value
        return(result)
      }
+     
+     # ALTERNATE MEASURE IF MAXS/MINS GROUPS ARE BOTH IDENTICAL
+     
+     # if (length(unique(maxs) == 1) & length(unique(mins)) == 1)
+     # {
+         # ??
+     # return(result)
+     # }
      
      for (i in 1:length(v_max_test())) {
        Pval <- append(Pval, t_testing3(i, v_max_test(), v_min_test()))
@@ -959,11 +1077,13 @@ server <- function(input, output, session) {
      
    })
    
+   # expression, log2fc, and p-value in one dataframe
    df_tt_test <- reactive({
      df_tt <- cbind(dfres(), Log2FC_test(), df_pval_test())
      return(df_tt)
    })
    
+   # expression, log2fc, p-value, and significance in one dataframe
    df_sig_test <- reactive({
      fc <- df_tt_test()[,(ncol(df_tt_test())-2)]
      logpval <- df_pval_test()[,2]
@@ -973,6 +1093,7 @@ server <- function(input, output, session) {
      return(df_sig)
    })
    
+   # list of significant proteins - but from all pairwise comparisons
    volcano_list_test <- eventReactive(input$heatmap_run, {
      protein <- df()[,1]
      t <- base::cbind(protein, df_sig_test())
@@ -982,12 +1103,14 @@ server <- function(input, output, session) {
      return(t)
    })
    
+   # index of groups selected to be shown on the heatmap
    heatmap_index_test <- reactive({
      v <- c()
      v <- append(v, which(df_trans()$group %in% input$groups_heatmap))
      return(v)
    })
    
+   # subsets the groups we want, then normalizes row-wise (per protein)
    hm_df_test <- reactive({
      h_i <- heatmap_index_test()
      df_sig <- base::subset(df_sig_test(), df_sig_test()$sig == TRUE)
@@ -1002,6 +1125,7 @@ server <- function(input, output, session) {
      return(hm_df)
    })
    
+   # calculates distance matrix of selected groups
    datadist_test <- reactive({
      number_obs <- base::nrow(df_trans()[df_trans()$group %in% input$groups_heatmap, ])
      datacor <- cor(t(hm_df_test()[,1:number_obs]))
@@ -1009,11 +1133,13 @@ server <- function(input, output, session) {
      return(datadist)
    })
    
+   # output: hierarchical clustering object by distance matrix
    hclust_test <- reactive({
      my_hclust_gene2 <- hclust(datadist_test(), method="average")
      return(my_hclust_gene2)
    })
    
+   # output: list of each protein and which cluster it falls under
    cluster_df_test <- reactive({
      cluster <- cutree(tree = hclust_test(), k=input$heatmap_clusters)
      cluster_df <- base::as.data.frame(cluster)
@@ -1021,6 +1147,21 @@ server <- function(input, output, session) {
      return(cluster_df)
    })
    
+   # returns a summary of the number of proteins per cluster
+   heatmap_cluster_numbers <- eventReactive(input$heatmap_run, {
+     amts <- c()
+     for (i in 1:input$heatmap_clusters){
+       amt <- length(cluster_df_test()[cluster_df_test()$cluster == i,])
+       amts <- append(amts, base::paste("Proteins in cluster ", i, ": ", amt, sep=""))
+     }
+     return(HTML(base::paste(amts, collapse='<br/>')))
+   })
+   
+   output$heatmap_cluster_numbers <- renderUI({
+     return(heatmap_cluster_numbers())
+   })
+   
+   # generates the heatmap
    heatmap_test <- eventReactive(input$heatmap_run, {
      num_groups <- length(input$groups_heatmap)
      number_obs <- base::nrow(df_trans()[df_trans()$group %in% input$groups_heatmap, ])
@@ -1037,6 +1178,7 @@ server <- function(input, output, session) {
      return(heatmap_test())
    })
    
+   # description of heatmap results and parameters
    heatmap_info <- eventReactive(input$heatmap_run, {
      nprot <- nrow(cluster_df_test())
      str1 <- base::paste("This heatmap was generated using ", nprot, " proteins.", sep="")
@@ -1049,6 +1191,7 @@ server <- function(input, output, session) {
      return(heatmap_info())
    })
    
+   # plot a graph of number of clusters vs silhouette width
    heatmap_silhouette <- eventReactive(input$heatmap_run, {
      silhouette_score <- function(k){
        my_hclust <- hclust(datadist_test(), method="average")
@@ -1070,6 +1213,7 @@ server <- function(input, output, session) {
    
   
    #################### PRINCIPAL COMPONENT ANALYSIS ####################
+   # takes top/bottom loadings for PCA and uses them as radio buttons to plot distribution
    observe({
      top <- pca_loadings_top()[1:3,1]
      bot <- pca_loadings_bot()[1:3,1]
@@ -1081,12 +1225,7 @@ server <- function(input, output, session) {
                         selected = combined[1])
    })
    
-   pca_summary <- reactive({
-     pca <- prcomp(pca_matrix_t(), center=TRUE, scale.=TRUE)
-     pca_sum <- summary(pca)
-     return(pca_sum)
-   })
-   
+   # orders dataframe by coefficient of variation
    cv_sorted <- reactive({
      unq <- base::unique(metadf()$V2)
      
@@ -1112,6 +1251,7 @@ server <- function(input, output, session) {
      return(sorted)
    })
    
+   # takes only the proteins that have the n largest cv's
    pca_matrix_t <- reactive({
      filtered <- cv_sorted()[(1:input$pca_topcv),]
      filtered <- base::subset(filtered, select = -c(pcv))
@@ -1119,37 +1259,49 @@ server <- function(input, output, session) {
      df_t <- t(filtered)
    })
    
-   pca <- eventReactive(input$submit, {
+   pca_summary <- reactive({
      pca <- prcomp(pca_matrix_t(), center=TRUE, scale.=TRUE)
+     pca_sum <- summary(pca)
+     return(pca_sum)
+   })
+
+   pca <- eventReactive(input$pca_run, {
+     pca <- prcomp(pca_matrix_t(), center=TRUE, scale.=TRUE)
+     # takes the rotation value
      df_pca <- base::as.data.frame(pca$x)
      
+     # assigns group to each replicate
      df_pca$sample <- rep(names(), times())
      df_pca$sample <- factor(df_pca$sample, levels=names())
-     df_pca$color <- case_when(df_pca$sample == names()[1] ~ rainbow(length(times()))[1],
-                               df_pca$sample == names()[2] ~ rainbow(length(times()))[2],
-                               df_pca$sample == names()[3] ~ rainbow(length(times()))[3],
-                               df_pca$sample == names()[4] ~ rainbow(length(times()))[4],
-                               df_pca$sample == names()[5] ~ rainbow(length(times()))[5],
-                               df_pca$sample == names()[6] ~ rainbow(length(times()))[6],
-                               TRUE ~ "white")
      
-     if(input$pc_x == 1 & input$pc_y == 2) {p <- ggplot(df_pca, aes(x=PC1, y=PC2, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times()))) 
-     if(input$pc_x == 1 & input$pc_y == 3) {p <- ggplot(df_pca, aes(x=PC1, y=PC3, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 1 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC1, y=PC4, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 1 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC1, y=PC5, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 2 & input$pc_y == 3) {p <- ggplot(df_pca, aes(x=PC2, y=PC3, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 2 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC2, y=PC4, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 2 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC2, y=PC5, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 3 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC3, y=PC4, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 3 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC3, y=PC5, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
-     if(input$pc_x == 4 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC4, y=PC5, col=sample)) + geom_point(shape=19, size=4, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     # assigns a color to each group
+     length_times <- length(times())
+     color <- c()
+     for(i in 1:length(df_pca$sample)){
+       index <- which(names() == df_pca$sample[i])
+       color <- append(color, rainbow(length_times)[index])
+     }
+     df_pca$color <- color
+     
+     if(input$pc_x == 1 & input$pc_y == 2) {p <- ggplot(df_pca, aes(x=PC1, y=PC2, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times()))) 
+     if(input$pc_x == 1 & input$pc_y == 3) {p <- ggplot(df_pca, aes(x=PC1, y=PC3, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 1 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC1, y=PC4, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 1 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC1, y=PC5, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 2 & input$pc_y == 3) {p <- ggplot(df_pca, aes(x=PC2, y=PC3, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 2 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC2, y=PC4, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 2 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC2, y=PC5, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 3 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC3, y=PC4, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 3 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC3, y=PC5, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     if(input$pc_x == 4 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC4, y=PC5, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
      return(p)
    })
    
+   # 2d plot of pca
    output$pca <- renderPlot({
      return(pca())
    })
    
+   # 3d plot of pca
    output$pca3d <- renderRglwidget({
      obs <- observations()
      
@@ -1159,23 +1311,14 @@ server <- function(input, output, session) {
      
      df_pca$sample <- rep(names(), times())
      
-     # for (i in length(df_))
-     
-     df_pca$color <- case_when(df_pca$sample == names()[1] ~ rainbow(length(times()))[1],
-                               df_pca$sample == names()[2] ~ rainbow(length(times()))[2],
-                               df_pca$sample == names()[3] ~ rainbow(length(times()))[3],
-                               df_pca$sample == names()[4] ~ rainbow(length(times()))[4],
-                               df_pca$sample == names()[5] ~ rainbow(length(times()))[5],
-                               df_pca$sample == names()[6] ~ rainbow(length(times()))[6],
-                               df_pca$sample == names()[7] ~ rainbow(length(times()))[7],
-                               df_pca$sample == names()[8] ~ rainbow(length(times()))[8],
-                               df_pca$sample == names()[9] ~ rainbow(length(times()))[9],
-                               df_pca$sample == names()[10] ~ rainbow(length(times()))[10],
-                               df_pca$sample == names()[11] ~ rainbow(length(times()))[11],
-                               df_pca$sample == names()[12] ~ rainbow(length(times()))[12],
-                               df_pca$sample == names()[13] ~ rainbow(length(times()))[13],
-                               TRUE ~ "white")
-     
+     length_times <- length(times())
+     color <- c()
+     for(i in 1:length(df_pca$sample)){
+       index <- which(names() == df_pca$sample[i])
+       color <- append(color, rainbow(length_times)[index])
+     }
+     df_pca$color <- color
+
      try(close3d())
      
      if(input$pc_x == 1 & input$pc_y == 2 & input$pc_z == 3) {plot3d(df_pca$PC1, df_pca$PC2, df_pca$PC3, col=df_pca$color, type="s", size=2, xlab="PC1", ylab="PC2", zlab="PC3")}
@@ -1206,7 +1349,8 @@ server <- function(input, output, session) {
      rgl.snapshot("www/pca3d.png", fmt = "png", top = TRUE)
    })
    
-   pca_importance <- eventReactive(input$submit, {
+   # scree plot
+   pca_importance <- eventReactive(input$pca_run, {
      pca_summary <- pca_summary()
      imp <- pca_summary[["importance"]][2:3,]
      imp <- t(imp)
@@ -1222,6 +1366,7 @@ server <- function(input, output, session) {
      return(pca_importance())
    })
    
+   # shows a table of top/bottom loadings
    pca_loadings_top <- reactive({
      if(input$pc_load == "PC1") {n <- 1}
      else if(input$pc_load == "PC2") {n <- 2}
@@ -1268,6 +1413,7 @@ server <- function(input, output, session) {
      return(pca_loadings_top())
    }, digits=5)
    
+   # for a particular PC, we can examine how the proteins are loaded
    pca_loadings_plot <- reactive({
      if(input$pc_load == "PC1") {n <- 1}
      else if(input$pc_load == "PC2") {n <- 2}
@@ -1287,6 +1433,7 @@ server <- function(input, output, session) {
      pca_loadings_plot()
    })
    
+   # plot a particular protein's distribution by group
    loadings_scatter <- eventReactive(input$plot_loadings_scatter, {
      if (input$select_loading == "Other") {
        table <- base::subset(df(), df()[,1] == input$select_loading_text)
@@ -1321,9 +1468,9 @@ server <- function(input, output, session) {
    output$loadings_scatter <- renderPlot({
      return(loadings_scatter())
    })
-
    
    ######################## GENE ONTOLOGY ##########################
+   # if choosing to use heatmap as list, then specify which of the heatmap's clusters are to be used.
    observe({
      choice <- seq(1:input$heatmap_clusters)
      updateCheckboxGroupInput(session = session,
@@ -1331,18 +1478,21 @@ server <- function(input, output, session) {
                               choices = choice)
    })
    
+   # processing if list=top cv
    go_listcv <- reactive({
      listcv <- df()[base::rownames(cv_sorted()),1]
      l <- listcv[1:input$go_topcv]
      return(as.vector(l))
    })
    
+   # processing if list=heatmap
    go_listheatmap <- reactive({
      df <- cbind.data.frame(volcano_list_test(), cluster_df_test())
      df <- subset(df, df$cluster %in% input$go_heatmap_clusters_choices)
      return(df)
    })
    
+   # processing if list=uploaded file
    go_listupload <- reactive({
      df <- req(input$go_file)
      df <- read.csv(input$go_file$datapath,
@@ -1353,6 +1503,7 @@ server <- function(input, output, session) {
      return(df[,1])
    })
    
+   # input: list of proteins, output: enrichment object - contains pathway name, pval, gene ratio, and associated genes
    go_enrichment <- eventReactive(input$go_calculate, {
      enrichment<- function(x, y){
        plot=enrichGO(x, org.Hs.eg.db,
@@ -1384,17 +1535,11 @@ server <- function(input, output, session) {
      for (i in 1:length(list1)) {
        list1[i] <- unlist(strsplit(list1[i], split="_", fixed=TRUE))[1]
      }
-      
+    
      return(enrichment(list1, input$GO_ont))
    })
    
-   observeEvent(input$go_calculate, {
-     choice <- go_descriptions()
-     updateSelectInput(session = session,
-                       inputId = "go_genelist",
-                       choices = choice)
-   })
-   
+   # enriched pathway names
    go_descriptions <- eventReactive(input$go_calculate, {
      return(go_enrichment()$Description)
    })
@@ -1403,6 +1548,15 @@ server <- function(input, output, session) {
      return(go_descriptions())
    })
    
+   # selection for heatmap viewing
+   observeEvent(input$go_calculate, {
+     choice <- go_descriptions()
+     updateSelectInput(session = session,
+                       inputId = "go_genelist",
+                       choices = choice)
+   })
+   
+   # for each enriched pathway, return a list of genes associated with the pathway
    go_geneID <- eventReactive(input$go_calculate, {
      p <- go_enrichment()$geneID
      p2 <- list()
@@ -1414,19 +1568,30 @@ server <- function(input, output, session) {
      return(p2)
    })
    
+   # for each enriched pathway, return the p-value
+   go_pvals <- eventReactive(input$go_calculate, {
+     pvals <- go_enrichment()$p.adjust
+     return(pvals)
+   })
+   
+   # after choosing ONE pathway to view, this will return the genes in the pathway
    go_sig_genes <- eventReactive(input$go_heatmap_run, {
      return(go_geneID()[[input$go_genelist]])
    })
    
+   # generates heatmap of proteins in the selected pathway. Can choose which groups to display
    go_new_heatmap <- eventReactive(input$go_heatmap_run, {
      oldnames <- df()[,1]
      newnames <- c()
+     
+     # if gene names have "_HUMAN" in them, then take only the name
      for (i in 1:length(oldnames)) {
         newnames <- list.append(newnames, unlist(strsplit(oldnames[i], split="_", fixed=TRUE))[1])
      }
      d <- cbind(newnames, df()[,2:ncol(df())])
      d <- subset(d, d[,1] %in% go_sig_genes()[[1]])
-
+     
+     # remove duplicated rows of proteins
      rn <- d[,1]
      nodup <- !duplicated(rn)
      rn <- rn[nodup]
@@ -1434,22 +1599,36 @@ server <- function(input, output, session) {
      d <- d[nodup,]
      rownames(d) <- rn
      
+     # normalize protein per row
      cal_z_score <- function(x) {
        (x - mean(x)) / sd(x)
      }
      
      d <- t(apply(d, 1, cal_z_score))
      
+     # subset dataframe by selected groups to view
+     dft <- df_trans()
+     dft <- subset(dft, dft$group %in% input$go_heatmap_groups)
+     obs_to_keep <- rownames(dft)
+
+     d <- d[,obs_to_keep]
+
      df_sample_c <- data.frame(group=rep(names(), times()))
+     df_sample_c <- subset(df_sample_c, df_sample_c$group %in% input$go_heatmap_groups)
+
      rownames(df_sample_c) <- colnames(d)
      
-     return(pheatmap(d, main=input$go_genelist, labels_col=colnames(df()[,-1]), cluster_cols=FALSE, annotation_col = df_sample_c))
+     pval_index <- which(go_descriptions() == input$go_genelist)
+     title <- base::paste(input$go_genelist, ", adjusted p-value: ", go_pvals()[pval_index], sep="")
+     
+     return(pheatmap(d, main=title, labels_col=colnames(df()[,-1]), cluster_cols=FALSE, annotation_col = df_sample_c))
    })
    
    output$go_new_heatmap <- renderPlot({
      return(go_new_heatmap())
    })
    
+   # shows dotplot: x-axis/size=gene ratio, color=p-value
    go_dotplot <- eventReactive(input$go_calculate, {
      return(enrichplot::dotplot(go_enrichment()))
      })
@@ -1458,6 +1637,7 @@ server <- function(input, output, session) {
      go_dotplot()
      })
    
+   # description of dotplot
    go_info <- eventReactive(input$go_calculate, {
      str1 <- "This list used a total of"
      if(input$go_proteinlist == "Heatmap"){
@@ -1484,6 +1664,7 @@ server <- function(input, output, session) {
    })
    
    ############################### GSEA ##############################
+   # if selected list is from heatmap, then select clusters to use
    observe({
      choice <- seq(1:input$heatmap_clusters)
      updateCheckboxGroupInput(session = session,
@@ -1492,6 +1673,7 @@ server <- function(input, output, session) {
                               selected = choice)
    })
    
+   # processing if list=heatmap
    gsea_listheatmap <- reactive({
      df <- cbind.data.frame(volcano_list_test(), cluster_df_test())
      df <- subset(df, df$cluster %in% input$gsea_heatmap_clusters_choices)
@@ -1499,6 +1681,7 @@ server <- function(input, output, session) {
      return(df)
    })
    
+   # processing if list=upload file
    gsea_listupload <- reactive({ 
      df <- req(input$gsea_file)
      df <- read.csv(input$gsea_file$datapath,
@@ -1510,6 +1693,7 @@ server <- function(input, output, session) {
      return(df)
    })
    
+   # returns a gsea object - includes gene sets and genes in each set
    gsea <- eventReactive(input$gsea_calculate, {
      geneset <- msigdbr(species= "Homo sapiens", category=input$gsea_set)
      geneset <- dplyr::select(geneset, gs_name, gene_symbol)
@@ -1522,6 +1706,7 @@ server <- function(input, output, session) {
        protlist <- gsea_listupload()[,2]
        protnames <- gsea_listupload()[,1]
      }
+     # this uses all proteins in the dataframe
      else if(input$gsea_proteinlist == "All") {
        protlist <- df_tt_test()[,(ncol(df_tt_test())-2)]
        protnames <- df()[,1]
@@ -1544,11 +1729,13 @@ server <- function(input, output, session) {
      return(gsea()@result)
    })
    
+   # returns a description of each gene set
    gsea_descriptions <- eventReactive(input$gsea_calculate, {
      g <- gsea_results()$ID
      return(g)
    })
    
+   # selection for heatmap/running enrichment score viewing
    observeEvent(input$gsea_calculate, {
      choice <- gsea_descriptions()
      updateSelectInput(session = session,
@@ -1556,6 +1743,7 @@ server <- function(input, output, session) {
                        choices = choice)
    })
    
+   # for each gene set, return the list of genes associated
    gsea_geneID <- eventReactive(input$gsea_calculate, {
      p <- gsea_results()$core_enrichment
      p2 <- list()
@@ -1567,10 +1755,12 @@ server <- function(input, output, session) {
      return(p2)
    })
    
+   # when ONE gene set is chosen, return that list of genes
    gsea_sig_genes <- eventReactive(input$gsea_heatmap_run, {
      return(gsea_geneID()[[input$gsea_genelist]])
    })
    
+   # running enrichment score plot, input: gsea object
    gsea_running <- eventReactive(input$gsea_heatmap_run, {
      descriptions <- as.vector(gsea_descriptions())
      p <- gseaplot(gsea(), geneSetID = which(descriptions %in% input$gsea_genelist))
@@ -1581,6 +1771,7 @@ server <- function(input, output, session) {
      return(gsea_running())
    })
    
+   # heatmap of selected groups showing proteins that are in the gene set
    gsea_new_heatmap <- eventReactive(input$gsea_heatmap_run, {
      oldnames <- df()[,1]
      newnames <- c()
@@ -1604,7 +1795,14 @@ server <- function(input, output, session) {
      
      d <- t(apply(d, 1, cal_z_score))
      
+     dft <- df_trans()
+     dft <- subset(dft, dft$group %in% input$gsea_heatmap_groups)
+     obs_to_keep <- rownames(dft)
+     
+     d <- d[,obs_to_keep]
+     
      df_sample_c <- data.frame(group=rep(names(), times()))
+     df_sample_c <- subset(df_sample_c, df_sample_c$group %in% input$gsea_heatmap_groups)
      rownames(df_sample_c) <- colnames(d)
      
      return(pheatmap(d, main=input$gsea_genelist, clustering_distance_rows = "correlation", cluster_cols=FALSE, annotation_col = df_sample_c))
@@ -1750,6 +1948,15 @@ server <- function(input, output, session) {
      }
    )
    
+   output$go_dotplot_download <- downloadHandler(filename = function() {
+     base::paste('GO-dotplot-', Sys.Date(), '.png', sep='')
+   },
+   content = function(file) {
+     png(file)
+     print(go_dotplot())
+     dev.off()
+   })
+   
    output$go_heatmap_download <- downloadHandler(
      filename = function() {
        base::paste('GO-', base::paste(input$go_genelist, collapse='-'), '-', Sys.Date(), '.png', sep='')
@@ -1757,6 +1964,28 @@ server <- function(input, output, session) {
      content = function(file) {
        png(file)
        print(go_new_heatmap())
+       dev.off()
+     }
+   )
+   
+   output$gsea_heatmap_download <- downloadHandler(
+     filename = function() {
+       base::paste('GSEA-', base::paste(input$gsea_genelist, collapse='-'), '-', Sys.Date(), '.png', sep='')
+     },
+     content = function(file) {
+       png(file)
+       print(gsea_new_heatmap())
+       dev.off()
+     }
+   )
+   
+   output$gsea_running_download <- downloadHandler(
+     filename = function() {
+       base::paste('GSEA-running-enrichment-score-', Sys.Date(), '.png', sep='')
+     },
+     content = function(file) {
+       png(file)
+       print(gsea_running())
        dev.off()
      }
    )
