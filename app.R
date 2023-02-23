@@ -23,7 +23,7 @@ ui <- fluidPage(
   
   # App title ----
   titlePanel("Proteomics"),
-  h5("Version updated as of: 02-18-2023 11:22"),
+  h5("Version updated as of: 02-23-2023 18:10"),
   
   # Sidebar layout with input and output definitions ----
   sidebarLayout(
@@ -97,6 +97,7 @@ ui <- fluidPage(
           textInput("protein_viewer_select", "Search Protein: "),
           actionButton("protein_viewer_run", "Run"),
           plotOutput("protein_viewer"),
+          plotOutput("protein_intensity_viewer"),
           tags$hr(),
           h3("Grouping"),
           tableOutput("meta_check")
@@ -192,9 +193,9 @@ ui <- fluidPage(
           actionButton("heatmap_run", "Run"),
           fixedRow(plotOutput("heatmap")),
           uiOutput("heatmap_cluster_numbers"),
+          downloadButton("heatmap_download", "Download Figure"),
           tags$hr(),
           uiOutput("heatmap_info"),
-          downloadButton("heatmap_download", "Download Figure"),
           tags$hr(),
           h3("Number of Clusters"),
           h5("Optimal number of clusters is the maximum silhouette score represented below."),
@@ -487,7 +488,7 @@ server <- function(input, output, session) {
    
    ################# DATA AND QUALITY CHECK #################
    # show contents for check
-   contents_table <- eventReactive(input$submit, {
+   summary_stats <- eventReactive(input$submit, {
      means <- apply(dfres(), 1, mean)
      max <- apply(dfres(), 1, max)
      min <- apply(dfres(), 1, min)
@@ -495,15 +496,19 @@ server <- function(input, output, session) {
      pcv <- stdev/means*100
      
      summary <- cbind.data.frame(df()[,1], means, max, min, stdev, pcv)
-     base::colnames(summary) <- c("Gene.Name", "Average", "Maximum", "Minimum", "SD", "%CV")
+     base::colnames(summary) <- c("Protein", "Average", "Maximum", "Minimum", "SD", "%CV")
      
+     return(summary)
+   })
+   
+   contents_table <- reactive({
      p <- df()[1:(observations()+1)]
      
      if(input$disp == "head") {
        p <- utils::head(p, n=20)
      }
      if(input$disp == "summary") {
-       p <- utils::head(summary, n=20)
+       p <- utils::head(summary_stats(), n=20)
      }
      
      return(p)
@@ -537,13 +542,38 @@ server <- function(input, output, session) {
      table <- table[,2:ncol(table)]
      table <- melt(table)
      table$group <- rep(names(), times())
+     title <- paste("Distribution of ", input$protein_viewer_select, sep="")
      p <- ggplot(table, aes(x=group, y=log(value), fill=group)) +
-      geom_boxplot() + geom_point(position = position_jitter(seed = 1, width = 0.2))
+      geom_boxplot() + geom_point(position = position_jitter(seed = 1, width = 0.2)) +
+      ggtitle(title)
+     return(p)
+   })
+   
+   protdist_intensity_viewer <- eventReactive(input$protein_viewer_run, {
+     ss <- summary_stats()
+     ss <- ss[order(ss$Average, decreasing=TRUE),]
+     ss$col[ss$Protein == input$protein_viewer_select] <- 1
+     ss$col[ss$Protein != input$protein_viewer_select] <- 0.1
+     ss$enum <- seq(1:nrow(ss))
+     
+     title <- paste("Average Expression of ", input$protein_viewer_select, sep="")
+     x_val <- ss[ss$col == 1, 8]
+     y_val <- ss[ss$col == 1, 2]
+     
+     p <- ggplot(ss, mapping=aes(x=enum, y=log(Average), color=factor(col))) + geom_point(aes(alpha=col, size=factor(col))) +
+       scale_color_manual(values=c('#999999','#E69F00')) + scale_size_manual(values=c(2,5)) + geom_point(aes(x=x_val, y=log(y_val), alpha=1)) +
+       theme(legend.position="none", axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.title.x = element_blank()) +
+       ggtitle(title)
+
      return(p)
    })
    
    output$protein_viewer <- renderPlot({
      return(protdist_viewer())
+   })
+   
+   output$protein_intensity_viewer <- renderPlot({
+     print(protdist_intensity_viewer())
    })
    
    ################# VENN DIAGRAM #########################
@@ -851,7 +881,6 @@ server <- function(input, output, session) {
    df_tt <- eventReactive(input$volcano_run, {
      df_tt <- base::cbind(dfres(), Log2FC(), df_pval())
      df_tt_test <- df_tt[order(df_tt$Pval),]
-     print(head(df_tt_test))
      return(df_tt)
    })
    
@@ -865,13 +894,18 @@ server <- function(input, output, session) {
      return(df_sig)
    })
    
-   output$volcano_parameters <- renderUI({
+   volcano_parameters <- eventReactive(input$volcano_run, {
      str1 <- base::paste("Significance: ", input$sig_cutoff)
      str2 <- base::paste("Adjustment method: ", input$adjustment)
      str3 <- base::paste("Fold change cutoff: ", input$fc_cutoff)
      HTML(base::paste(str1, str2, str3, sep = '<br/>'))
    })
    
+   output$volcano_parameters <- renderUI({
+     return(volcano_parameters())
+   })
+   
+   # generates volcano plot
    volcano <- eventReactive(input$volcano_run, {
      df_volcano <- df_sig()
      g1 <- base::paste(input$groups1, collapse='/')
@@ -969,7 +1003,6 @@ server <- function(input, output, session) {
      df_selected <- as.data.frame(df_selected)
      
      means_selected <- means_test_volcano()[rownames(sigs),]
-     print(is.vector(means_selected))
      
      if(is.vector(means_selected)){
        means_selected <- t(means_selected)
@@ -982,13 +1015,13 @@ server <- function(input, output, session) {
 
      
      colnames(t) <- c("Protein", "Expression", names)
-     print(head(t))
      return(t)
    })
    
    output$ma_plot_info <- renderTable({
      MA_pi <- MA_plot_info()[order(-MA_plot_info()$Expression),]
-     MA_pi$Expression <- log(MA_pi$Expression)
+     # MA_pi$Expression <- log(MA_pi$Expression)
+     
      return(utils::head(MA_pi[c(1,2)], n=20))
    })
    
