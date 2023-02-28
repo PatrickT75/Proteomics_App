@@ -1,5 +1,6 @@
 library(shiny)
 library(ggplot2)
+library(RColorBrewer)
 library(reshape2)
 library(pheatmap)
 library(rgl)
@@ -23,7 +24,7 @@ ui <- fluidPage(
   
   # App title ----
   titlePanel("Proteomics"),
-  h5("Version updated as of: 02-23-2023 18:10"),
+  h5("Version updated as of: 02-26-2023 22:32"),
   
   # Sidebar layout with input and output definitions ----
   sidebarLayout(
@@ -47,6 +48,9 @@ ui <- fluidPage(
       tags$hr(),
       radioButtons("na_processing", "NA values: ",
                    choices = c("Omit", "Replace"),
+                   selected = "Omit"),
+      radioButtons("duplicates", "Duplicate Proteins: ",
+                   choices = c("Omit", "Keep"),
                    selected = "Omit"),
       tags$hr(),
       sliderInput("sig_cutoff", "Significance",
@@ -97,7 +101,9 @@ ui <- fluidPage(
           textInput("protein_viewer_select", "Search Protein: "),
           actionButton("protein_viewer_run", "Run"),
           plotOutput("protein_viewer"),
+          downloadButton("protein_viewer_download", "Download Figure"),
           plotOutput("protein_intensity_viewer"),
+          downloadButton("protein_intensity_viewer_download", "Download Figure"),
           tags$hr(),
           h3("Grouping"),
           tableOutput("meta_check")
@@ -121,11 +127,13 @@ ui <- fluidPage(
                                                 Group2 = "group2"),
                                     selected = "group1"),
                  uiOutput("venn_descriptions"),
+                 downloadButton("venn_table_download", "Download Table"),
                  tableOutput("venndiagram_table")
                  ),
         
         tabPanel("Violin",
                  h3("Violin Plot"),
+                 actionButton("violin_run", "Run"),
                  plotOutput("violin"),
                  downloadButton("violin_download", "Download Figure"),
                  tags$hr(),
@@ -138,6 +146,7 @@ ui <- fluidPage(
           h3("Correlation Heatmap"),
           radioButtons("corr_disable", "Show Values", choices=c("Enable", "Disable"), selected="Enable"),
           radioButtons("corr_type", "Compute correlation: ", choices=c(Pearson="pearson", Spearman="spearman"), selected="pearson"),
+          actionButton("corr_run", "Run"),
           plotOutput("correlation"),
           downloadButton("correlation_download", "Download Figure"),
           tags$hr(),
@@ -165,16 +174,16 @@ ui <- fluidPage(
           tags$hr(),
           h3("Protein Table"),
           radioButtons("sort_volcano_list", "Sort By: ",
-                       choices = c("P value",
+                       choices = c("P-value",
                                   "Fold change",
                                   "Average Expression"),
-                       selected = "P value"),
+                       selected = "P-value"),
           tableOutput("volcano_protein_list"),
           
           radioButtons("volcanodownloadformat", "Format",
-                       choices = c(List = "list",
-                                   FlatFile = "info",
-                                   Details = "details"),
+                       choices = c(Details = "details",
+                                   "Flat File" = "info",
+                                    List = "list"),
                        selected = "details"),
           downloadButton("volcano_button", "Download Table"),
           
@@ -255,14 +264,8 @@ ui <- fluidPage(
           downloadButton("loadings_button", "Download Loadings"),
           plotOutput("pca_loadings_plot"),
           downloadButton("pca_loadings_plot_download", "Download Figure"),
-          tags$hr(),
-          fixedRow(
-          column(6, radioButtons("select_loading", "Plot Distribution of: ", choices=c("Protein 1", "Protein 2")),
-                    textInput("select_loading_text", "Search: "),
-                    textInput("normalize", "Normalize to (if present): "),
-                    actionButton("plot_loadings_scatter", "Plot")),
-          ),
-          plotOutput("loadings_scatter")
+          plotOutput("pca_loadings_bar"),
+          downloadButton("pca_loadings_bar_download", "Download Figure"),
         ),
         
         tabPanel("Pathway",
@@ -271,7 +274,7 @@ ui <- fluidPage(
                               choices = c("Heatmap",
                                           "Top CV",
                                           "Upload File"),
-                              selected = "Top CV"),
+                              selected = "Heatmap"),
                  
                  tags$hr(),
                  conditionalPanel(condition = "input.go_proteinlist == 'Heatmap'",
@@ -289,13 +292,17 @@ ui <- fluidPage(
                                                        ".csv"))),
                  tags$hr(),
                  radioButtons("GO_ont", "Select Ontology: ",
-                              choices = c(Biological_Process = "BP",
-                                          Cellular_Compartment = "CC",
-                                          Molecular_Function = "MF"),
-                              selected = "CC"),
+                              choices = c("Biological Process" = "BP",
+                                          "Cellular Compartment" = "CC",
+                                          "Molecular Function" = "MF"),
+                              selected = "BP"),
+                 radioButtons("go_universe", "Universe: ",
+                              choices = c("This dataset" = "DF",
+                                          "All genes" = "All"),
+                              selected = "DF"),
                  actionButton("go_calculate", "Run"),
                  plotOutput("go_dotplot"),
-                 downloadButton("go_dotplot_download", "Donwload Figure"),
+                 downloadButton("go_dotplot_download", "Download Figure"),
                  uiOutput("go_info"),
                  tags$hr(),
                  selectInput("go_genelist", "See genes involved in: ",
@@ -348,6 +355,15 @@ ui <- fluidPage(
                  plotOutput("gsea_new_heatmap"),
                  downloadButton("gsea_heatmap_download", "Download Figure")
           ),
+        tabPanel("CNET", 
+                 h3("CNET Plot for Pathway Visualization"),
+                 radioButtons("cnet_proteinlist", "Select protein list: ",
+                              choices = c("Gene Ontology",
+                                          "GSEA"),
+                              selected = "Gene Ontology"),
+                 actionButton("cnet_run", "Run"),
+                 plotOutput("cnet_plot")
+                 ),
         selected = "Data"
       )
     )
@@ -468,6 +484,10 @@ server <- function(input, output, session) {
      df <- df[,order(metadf()$V2)]
      df <- cbind.data.frame(Protein,df)
      
+     if(input$duplicates == "Omit"){
+     df <- df %>% distinct(Protein, .keep_all=TRUE)
+     }
+     
      return(df)
    })
    
@@ -501,7 +521,7 @@ server <- function(input, output, session) {
      return(summary)
    })
    
-   contents_table <- reactive({
+   contents_table <- eventReactive(input$submit, {
      p <- df()[1:(observations()+1)]
      
      if(input$disp == "head") {
@@ -519,14 +539,17 @@ server <- function(input, output, session) {
    })
    
    # description for contents table
-   output$length <- renderUI({
+   contents_table_length <- eventReactive(input$submit, {
      len <- base::nrow(dfres())
      
      str1 <- base::paste("Number of groups: ", ngroup())
      str2 <- base::paste("Number of samples: ", observations())
      str3 <- base::paste("Number of proteins included: ", len)
      HTML(base::paste(str1, str2, str3, sep = '<br/>'))
-     
+   })
+   
+   output$length <- renderUI({
+     return(contents_table_length())
    })
    
    output$meta_check <- renderTable({
@@ -556,14 +579,14 @@ server <- function(input, output, session) {
      ss$col[ss$Protein != input$protein_viewer_select] <- 0.1
      ss$enum <- seq(1:nrow(ss))
      
-     title <- paste("Average Expression of ", input$protein_viewer_select, sep="")
+     title <- paste("Log(Expression) of ", input$protein_viewer_select, " compared to other proteins", sep="")
      x_val <- ss[ss$col == 1, 8]
      y_val <- ss[ss$col == 1, 2]
      
      p <- ggplot(ss, mapping=aes(x=enum, y=log(Average), color=factor(col))) + geom_point(aes(alpha=col, size=factor(col))) +
        scale_color_manual(values=c('#999999','#E69F00')) + scale_size_manual(values=c(2,5)) + geom_point(aes(x=x_val, y=log(y_val), alpha=1)) +
        theme(legend.position="none", axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.title.x = element_blank()) +
-       ggtitle(title)
+       ggtitle(title) + theme(plot.title = element_text(hjust = 0.5))
 
      return(p)
    })
@@ -715,20 +738,25 @@ server <- function(input, output, session) {
      {return(0.01)}
    })
    
-   violin <- eventReactive(input$submit, {
+   violin <- eventReactive(input$violin_run, {
+     withProgress(message="Generating Violin Plot", value=0.1, {
      len <- base::nrow(dfres())
+     
+     incProgress(0.3, detail = "Melting dataframe...")
      dfres_melt <- melt(dfres())
+     incProgress(0.2, detail="Plotting...")
      p <- ggplot(dfres_melt, aes(x=variable, y=log(value), fill=variable)) +
        geom_violin() + geom_boxplot() + geom_point(position = position_jitter(seed = 1, width = 0.2), alpha=alpha()) +
        theme(axis.ticks.x=element_blank(), axis.text.x=element_blank(),)
      return(p)
+     })
    })
    
    output$violin <- renderPlot({
      return(violin())
    })
    
-   violin_agg <- eventReactive(input$submit, {
+   violin_agg <- eventReactive(input$violin_run, {
      len <- base::nrow(dfres())
      dfres_melt <- melt(dfres())
      
@@ -742,13 +770,15 @@ server <- function(input, output, session) {
    })
    
    output$violin_agg <- renderPlot({
+     withProgress(message="Rendering...", value=0.5, {
      return(violin_agg())
+     })
    })
    
    
    ################## CORRELATION AND SCATTER PLOT #####################
    # Pearson or Spearman.
-   corrmap <- reactive({
+   corrmap <- eventReactive(input$corr_run, {
      cormat <- cor(dfres(), method=input$corr_type)
      
      get_lower_tri<-function(cormat){
@@ -961,7 +991,7 @@ server <- function(input, output, session) {
      if(input$sort_volcano_list == "Fold change") {
        t <- t[sort(abs(t[,2]), decreasing=TRUE, index.return=TRUE)[[2]],]
      }
-     else if (input$sort_volcano_list == "P value") {
+     else if (input$sort_volcano_list == "P-value") {
        t <- t[base::order(t$LogPval, decreasing=TRUE),]
      }
      else if (input$sort_volcano_list == "Average Expression") {
@@ -1285,14 +1315,19 @@ server <- function(input, output, session) {
    })
    
    # takes only the proteins that have the n largest cv's
-   pca_matrix_t <- reactive({
-     filtered <- cv_sorted()[(1:input$pca_topcv),]
-     filtered <- base::subset(filtered, select = -c(pcv))
+   pca_matrix_t <- eventReactive(input$pca_run, {
      
-     df_t <- t(filtered)
+     withProgress(message = 'Filtering by Top CV...', value = 0.2, {
+       filtered <- cv_sorted()[(1:input$pca_topcv),]
+       filtered <- base::subset(filtered, select = -c(pcv))
+       incProgress(0.8, detail = "Finished filtering")
+       df_t <- t(filtered)
+     })
+     
+     return(df_t)
    })
    
-   pca_summary <- reactive({
+   pca_summary <- eventReactive(input$pca_run, {
      pca <- prcomp(pca_matrix_t(), center=TRUE, scale.=TRUE)
      pca_sum <- summary(pca)
      return(pca_sum)
@@ -1300,6 +1335,7 @@ server <- function(input, output, session) {
 
    pca <- eventReactive(input$pca_run, {
      pca <- prcomp(pca_matrix_t(), center=TRUE, scale.=TRUE)
+     
      # takes the rotation value
      df_pca <- base::as.data.frame(pca$x)
      
@@ -1326,6 +1362,7 @@ server <- function(input, output, session) {
      if(input$pc_x == 3 & input$pc_y == 4) {p <- ggplot(df_pca, aes(x=PC3, y=PC4, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
      if(input$pc_x == 3 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC3, y=PC5, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
      if(input$pc_x == 4 & input$pc_y == 5) {p <- ggplot(df_pca, aes(x=PC4, y=PC5, col=sample)) + geom_point(shape=19, size=7, alpha=0.7)} + scale_colour_manual(values = rainbow(length(times())))
+     
      return(p)
    })
    
@@ -1336,9 +1373,11 @@ server <- function(input, output, session) {
    
    # 3d plot of pca
    output$pca3d <- renderRglwidget({
+     withProgress(message='3D PCA', value=0.2, {
      obs <- observations()
      
      df_t <- pca_matrix_t()
+     incProgress(0.2, message="Calculating principal components...")
      pca <- prcomp(df_t, center=TRUE, scale.=TRUE)       
      df_pca <- base::as.data.frame(pca$x)
      
@@ -1353,6 +1392,8 @@ server <- function(input, output, session) {
      df_pca$color <- color
 
      try(close3d())
+     
+     incProgress(0.3, "Plotting values...")
      
      if(input$pc_x == 1 & input$pc_y == 2 & input$pc_z == 3) {plot3d(df_pca$PC1, df_pca$PC2, df_pca$PC3, col=df_pca$color, type="s", size=2, xlab="PC1", ylab="PC2", zlab="PC3")}
      if(input$pc_x == 1 & input$pc_y == 2 & input$pc_z == 4) {plot3d(df_pca$PC1, df_pca$PC2, df_pca$PC4, col=df_pca$color, type="s", size=2, xlab="PC1", ylab="PC2", zlab="PC4") }
@@ -1369,6 +1410,8 @@ server <- function(input, output, session) {
      
      legend3d("topright", legend = unique(df_pca$sample), col=rainbow(length(times())), pch = 16, cex=0.9, inset=c(0.02))
      
+     incProgress(0.2, message="Setting up graphics...")
+     
      if (!rgl.useNULL())
        play3d(par3dinterp(time = (0:2)*0.75, userMatrix = list(M,
                                                                rotate3d(M, pi/2, 1, 0, 0),
@@ -1376,6 +1419,7 @@ server <- function(input, output, session) {
               duration = 10)
      
      rglwidget()
+     })
    })
    
    observeEvent(input$pca3d_snapshot, {
@@ -1466,41 +1510,57 @@ server <- function(input, output, session) {
      pca_loadings_plot()
    })
    
-   # plot a particular protein's distribution by group
-   loadings_scatter <- eventReactive(input$plot_loadings_scatter, {
-     if (input$select_loading == "Other") {
-       table <- base::subset(df(), df()[,1] == input$select_loading_text)
-     }
-     else {
-       table <- base::subset(df(), df()[,1] == input$select_loading)
-     }
+   pca_loadings_bar <- eventReactive(input$pca_run, {
+     pca_loadings_full <- rbind(as.matrix(pca_loadings_top()), as.matrix(pca_loadings_bot()[order(-pca_loadings_bot()$bottom_values),]))
+     pca_loadings_full <- as.data.frame(pca_loadings_full)
      
-     expression <- as.numeric(table[,-1])
+     colnames(pca_loadings_full) <- c("Proteins", "Values")
+     pca_loadings_full$Values <- as.numeric(pca_loadings_full$Values)
      
-     if (input$normalize %in% df()[,1]) {
-       standard <- base::subset(df(), df()[,1] == input$normalize)
-       standard <- as.numeric(standard[,-1])
-       expression <- expression/standard
-     }
+     pca_loadings_full <- pca_loadings_full %>% distinct(Proteins, .keep_all=TRUE)
      
-     group <- rep(names(), times())
-     table_t <- cbind.data.frame(group, expression)
+     title <- paste("Loadings for ", input$pc_load, sep="")
      
-     p <- ggplot(table_t, aes(x=group, y=expression)) + geom_point()
-     if (input$select_loading != "Other") {title <- input$select_loading}
-     else if (input$select_loading == "Other") {title <- input$select_loading_text}
+     p <- ggplot(data=pca_loadings_full, aes(x=factor(Proteins, level=pca_loadings_full$Protein), y=Values, fill=Values)) + geom_bar(stat="identity") +
+       coord_flip() + scale_fill_gradient2(low="blue", high="red", mid="white", midpoint=0) + xlab("Protein") +
+       theme_classic() + ggtitle(title) + theme(plot.title = element_text(hjust = 0.5))
      
-     if (input$normalize %in% df()[,1]) {
-       title <- base::paste(title, "normalized to", input$normalize, sep=" ")
-     }
-     
-     p <- p + ggtitle(title)
      return(p)
    })
-
-   output$loadings_scatter <- renderPlot({
-     return(loadings_scatter())
+   
+   output$pca_loadings_bar <- renderPlot({
+     return(pca_loadings_bar())
    })
+   # loadings_scatter <- eventReactive(input$plot_loadings_scatter, {
+   #   if (input$select_loading == "Other") {
+   #     table <- base::subset(df(), df()[,1] == input$select_loading_text)
+   #   }
+   #   else {
+   #     table <- base::subset(df(), df()[,1] == input$select_loading)
+   #   }
+   #   
+   #   expression <- as.numeric(table[,-1])
+   #   
+   #   if (input$normalize %in% df()[,1]) {
+   #     standard <- base::subset(df(), df()[,1] == input$normalize)
+   #     standard <- as.numeric(standard[,-1])
+   #     expression <- expression/standard
+   #   }
+   #   
+   #   group <- rep(names(), times())
+   #   table_t <- cbind.data.frame(group, expression)
+   #   
+   #   p <- ggplot(table_t, aes(x=group, y=expression)) + geom_point()
+   #   if (input$select_loading != "Other") {title <- input$select_loading}
+   #   else if (input$select_loading == "Other") {title <- input$select_loading_text}
+   #   
+   #   if (input$normalize %in% df()[,1]) {
+   #     title <- base::paste(title, "normalized to", input$normalize, sep=" ")
+   #   }
+   #   
+   #   p <- p + ggtitle(title)
+   #   return(p)
+   # })
    
    ######################## GENE ONTOLOGY ##########################
    # if choosing to use heatmap as list, then specify which of the heatmap's clusters are to be used.
@@ -1554,6 +1614,28 @@ server <- function(input, output, session) {
        return(p)
      }
      
+     ds_full <- df()[,1]
+     for (i in 1:length(ds_full)) {
+       ds_full[i] <- unlist(strsplit(ds_full[i], split="_", fixed=TRUE))[1]
+     }
+     
+     enrichment_dataset <- function(x, y){
+       plot=enrichGO(x, org.Hs.eg.db,
+                     keyType = "SYMBOL",
+                     ont=y,
+                     universe=ds_full,
+                     pvalueCutoff = 0.05,
+                     pAdjustMethod = "BH",
+                     qvalueCutoff = 0.02,
+                     minGSSize=10,
+                     maxGSSize = 500,
+                     readable = FALSE,
+                     pool = FALSE)
+       p <- plot
+       print("enrich with dataset done")
+       return(p)
+     }
+     
      if (input$go_proteinlist == "Heatmap"){
        list1 <- go_listheatmap()$protein
      }
@@ -1564,12 +1646,35 @@ server <- function(input, output, session) {
        list1 <- go_listupload()
      }
      
-     list2 <- c()
      for (i in 1:length(list1)) {
        list1[i] <- unlist(strsplit(list1[i], split="_", fixed=TRUE))[1]
      }
     
-     return(enrichment(list1, input$GO_ont))
+     noSig <- as.data.frame("No significant enrichment found!")
+     
+     if(input$go_universe == "All"){
+     withProgress(message = 'Calculating enrichment', value = 0.1, {
+       enrichment <- enrichment(list1, input$GO_ont)
+       incProgress(0.9, detail = "Enrichment done")
+     })
+     }
+     else if(input$go_universe == "DF"){
+       withProgress(message = 'Calculating enrichment', value = 0.1, {
+         enrichment <- enrichment_dataset(list1, input$GO_ont)
+         incProgress(0.9, detail = "Enrichment done")
+       })
+     }
+
+     return(enrichment)
+   })
+   
+   # shows dotplot: x-axis/size=gene ratio, color=p-value
+   go_dotplot <- eventReactive(input$go_calculate, {
+     return(enrichplot::dotplot(go_enrichment()))
+   })
+   
+   output$go_dotplot <- renderPlot({
+     go_dotplot()
    })
    
    # enriched pathway names
@@ -1623,6 +1728,8 @@ server <- function(input, output, session) {
      }
      d <- cbind(newnames, df()[,2:ncol(df())])
      d <- subset(d, d[,1] %in% go_sig_genes()[[1]])
+     print("colnames of d")
+     print(head(d))
      
      # remove duplicated rows of proteins
      rn <- d[,1]
@@ -1652,7 +1759,8 @@ server <- function(input, output, session) {
      rownames(df_sample_c) <- colnames(d)
      
      pval_index <- which(go_descriptions() == input$go_genelist)
-     title <- base::paste(input$go_genelist, ", adjusted p-value: ", go_pvals()[pval_index], sep="")
+     pv <- format(go_pvals()[pval_index], scientific = TRUE, digits = 4)
+     title <- base::paste(input$go_genelist, ", adjusted p-value: ", pv, sep="")
      
      return(pheatmap(d, main=title, labels_col=colnames(df()[,-1]), cluster_cols=FALSE, annotation_col = df_sample_c))
    })
@@ -1660,15 +1768,6 @@ server <- function(input, output, session) {
    output$go_new_heatmap <- renderPlot({
      return(go_new_heatmap())
    })
-   
-   # shows dotplot: x-axis/size=gene ratio, color=p-value
-   go_dotplot <- eventReactive(input$go_calculate, {
-     return(enrichplot::dotplot(go_enrichment()))
-     })
-   
-   output$go_dotplot <- renderPlot({
-     go_dotplot()
-     })
    
    # description of dotplot
    go_info <- eventReactive(input$go_calculate, {
@@ -1680,7 +1779,7 @@ server <- function(input, output, session) {
      }
      if(input$go_proteinlist == "Top CV"){
        str2 <- base::paste(length(go_listcv()))
-       str4 <- base::paste(" the top ", input$go_topcv, " largest CV.", sep="")
+       str4 <- base::paste(" the dataset uploaded, ranked by largest CV.", sep="")
      }
      if(input$go_proteinlist == "Upload File"){
        str2 <- length(go_listupload())
@@ -1728,6 +1827,8 @@ server <- function(input, output, session) {
    
    # returns a gsea object - includes gene sets and genes in each set
    gsea <- eventReactive(input$gsea_calculate, {
+     withProgress(message = 'Running GSEA', value=0.1, {
+     incProgress(0.3, "Gathering gene set...")
      geneset <- msigdbr(species= "Homo sapiens", category=input$gsea_set)
      geneset <- dplyr::select(geneset, gs_name, gene_symbol)
      
@@ -1753,9 +1854,11 @@ server <- function(input, output, session) {
      protlist <- na.omit(protlist)
      protlist <- sort(protlist, decreasing=TRUE)
      
+     incProgress(0.2, "Calculating GSEA...")
      test_gse <- GSEA(protlist, exponent =1, minGSSize = 10, maxGSSize = 2000, eps=1e-10,
                     pvalueCutoff =0.05, pAdjustMethod= "BH", TERM2GENE = geneset)
      return(test_gse)
+     })
    })
    
    gsea_results <- eventReactive(input$gsea_calculate, {
@@ -1845,6 +1948,20 @@ server <- function(input, output, session) {
      return(gsea_new_heatmap())
    })
    
+   ############################### CNET ##########################
+   cnet_plot <- eventReactive(input$cnet_run, {
+     if(input$cnet_proteinlist == "Gene Ontology"){
+       p <- enrichplot::cnetplot(go_enrichment())
+     }
+     else if(input$cnet_proteinlist == "GSEA"){
+       p <- enrichplot::cnetplot(gsea())
+     }
+     return(p)
+   })
+   
+   output$cnet_plot <- renderPlot({
+     return(cnet_plot()) 
+   })
    ############################ POPUP ##############################
    dataModal <- function(failed = FALSE) {
      modalDialog(
@@ -1871,13 +1988,24 @@ server <- function(input, output, session) {
    })
    
    ########################### DOWNLOAD FIGURES #######################
-   output$venndiagram_download <- downloadHandler(
+   output$protein_viewer_download <- downloadHandler(
      filename = function() {
-       base::paste('venn-diagram-', Sys.Date(), '.png', sep='')
+       base::paste('boxplot-', input$protein_viewer_select, '-', Sys.Date(), '.png', sep='')
      },
      content = function(file) {
        png(file)
-       print(venn_diagram())
+       print(protdist_viewer())
+       dev.off()
+     }
+   )
+   
+   output$protein_intensity_viewer_download <- downloadHandler(
+     filename = function() {
+       base::paste('relative-intensity-', input$protein_viewer_select, '-', Sys.Date(), '.png', sep='')
+     },
+     content = function(file) {
+       png(file)
+       print(protdist_intensity_viewer())
        dev.off()
      }
    )
@@ -1902,6 +2030,31 @@ server <- function(input, output, session) {
        print(violin_agg())
        dev.off()
      }
+   )
+   
+   output$venndiagram_download <- downloadHandler(
+     filename = function() {
+       base::paste('venn-diagram-', Sys.Date(), '.png', sep='')
+     },
+     content = function(file) {
+       png(file)
+       print(venn_diagram())
+       dev.off()
+     }
+   )
+   
+   output$venn_table_download <- downloadHandler(
+   filename = function() {
+     base::paste('unique-proteins-', base::paste(input$venn_unique, collapse='/'), '-', Sys.Date(), '.csv', sep='')
+   },
+   content = function(file) {
+     g1 <- base::paste(input$groups1, collapse='/')
+     g2 <- base::paste(input$groups2, collapse='/')
+     
+     meta <- base::paste("#",Sys.time(),", Groups compared: ", base::paste(input$venn_choices, collapse='/'), sep='')
+     write.table(meta, file, append=TRUE, row.names=FALSE, col.names=FALSE)
+     write.table(filtered_venndiagram_table(), file, append=TRUE, row.names=FALSE, col.names=FALSE, sep=',')
+   }
    )
    
    output$correlation_download <- downloadHandler(
@@ -1961,11 +2114,22 @@ server <- function(input, output, session) {
    
    output$pca_loadings_plot_download <- downloadHandler(
      filename = function() {
-       base::paste('pca-loadings-', Sys.Date(), '.png', sep='')
+       base::paste('pca-loadings-scatterplot-', Sys.Date(), '.png', sep='')
      },
      content = function(file) {
        png(file)
        print(pca_loadings_plot())
+       dev.off()
+     }
+   )
+   
+   output$pca_loadings_bar_download <- downloadHandler(
+     filename = function() {
+       base::paste('pca-loadings-barplot-', Sys.Date(), '.png', sep='')
+     },
+     content = function(file) {
+       png(file)
+       print(pca_loadings_bar())
        dev.off()
      }
    )
@@ -1982,7 +2146,7 @@ server <- function(input, output, session) {
    )
    
    output$go_dotplot_download <- downloadHandler(filename = function() {
-     base::paste('GO-dotplot-', Sys.Date(), '.png', sep='')
+     base::paste('GO-dotplot-', input$GO_ont, '-', Sys.Date(), '.png', sep='')
    },
    content = function(file) {
      png(file)
